@@ -1,0 +1,1175 @@
+---
+title: "Trabajo Final DiplomaCSC - Opción 2"
+output: html_notebook
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+## Carga de librerías a utilizar
+
+```{r library}
+library(tidyverse)
+library(tidytext)
+library(tm)
+library(textstem)
+library(patchwork)
+library(wordcloud) 
+library(plotly)
+library(topicmodels)
+library(tictoc)
+library(cowplot)
+library(reshape2)
+library(stm)
+library(textrecipes)
+library(textclean)
+library(tidymodels)
+```
+
+## Etapa 1: carga de datos y preprocesamiento
+
+El archivo que se adjunta consiste en un corpus de unas 7.000 noticias scrapeadas entre julio y septiembre de 2019 de los siguientes medios de circulación nacional:
+
+Télam La Nación Clarín Perfil Infobae MinutoUno Página 12
+
+Constituye una muestra aleatoria del corpus construido por Florencia Piñeyrúa para su tesina de grado “Procesamiento del lenguaje natural aplicado al estudio de tópicos de noticias de seguridad en Argentina: julio a septiembre 2019”. Una exposición más concentrada de sus resultados puede encontrarse en el siguiente artículo.
+
+El corpus contiene las siguientes variables:
+
+id : identificador de cada documento
+url : link a la noticia original
+fecha : fecha de publicación
+anio : año de publicación
+mes : mes de publicación
+dia : dia de publicación
+medio : medio en el que fue publicado
+orientacion: clasificación -provisoria- de los medios según su línea
+editorial predominante (más conservador, más progresista, neutral)
+titulo
+texto
+
+### Carga dataset
+
+```{r readcsv}
+corpus_base <- read_csv("M5_corpus_medios.csv") 
+```
+
+```{r analisis_base}
+# En este apartado vemos cuántas noticias aporta cada medio al corpus y calculamos la proporción sobre el total.
+
+    corpus_base %>%
+        group_by(medio) %>%
+        summarise(n=n()) %>%
+        mutate(
+                total = sum(n),
+                prop = n/total*100
+                ) %>%
+        ungroup() %>%
+        select(medio, n, prop) %>% 
+        arrange(desc(n))
+```
+
+### Normalización y tokenización
+
+```{r tokens}
+corpus_tidy <- corpus_base %>% 
+    mutate(texto= stringi::stri_trans_general(texto, "Latin-ASCII"),
+         titulo = stringi::stri_trans_general(titulo, "Latin-ASCII")) %>% 
+    mutate(texto = str_replace_all(texto, '[[:digit:]]+', '')) %>% 
+    unnest_tokens(word, texto, to_lower = TRUE)
+
+# En este este código tomamos el corpus de texto "corpus_base", lo normalizamos convirtiendo el texto y el título a caracteres ASCII, eliminamos los dígitos del texto y finalmente los dividimos en tokens para su posterior análisis.
+```
+
+### Eliminar stopwords
+
+```{r stopwords}
+stop_words_1 <- read_csv('https://raw.githubusercontent.com/Alir3z4/stop-words/master/spanish.txt', col_names=FALSE) %>%
+        rename(word = X1) %>%
+        mutate(word = stringi::stri_trans_general(word, "Latin-ASCII"))
+
+# En este código leemos un archivo CSV de stop words en español ubicado en la URL especificada, renombramos la columna a "word" y luego transformamos las palabras en la columna para asegurarnos de que estén en formato ASCII. El resultado final es un dataframe llamado "stop_words_1" que contiene la lista de stopwords normalizadas.
+
+stop_words_2 <- read_csv("z_stopwords.txt", col_names = FALSE) %>% 
+  rename(word = X1) %>% 
+   mutate(word=stringi::stri_trans_general(word, "Latin-ASCII"))
+
+# Ídem pero el archivo CSV llamado "z_stopwords.txt" se carga desde la carpeta.
+
+stop_words_full <- stop_words_1 %>% 
+  bind_rows(stop_words_2) %>% 
+  distinct()
+
+# En este paso combinamos los dos dataframes de stopwords, eliminamos las filas duplicadas y guardamos el resultado en un nuevo dataframe llamado "stop_words_full". Este dataframe contiene la lista completa y única de stopwords normalizadas.
+
+corpus_tidy <- corpus_tidy %>% 
+  anti_join(stop_words_full)
+
+# En este código eliminamos las stopwords del corpus de texto "corpus_tidy" utilizando la lista de stopwords contenida en el dataframe "stop_words_full". Este paso en el procesamiento de texto es necesario para eliminar palabras que no aportan significado para el análisis posterior.
+```
+
+### Corrección "años"
+
+```{r correccion}
+corpus_tidy <- corpus_tidy %>% 
+  mutate(word = case_when(
+    word == 'ano' ~ 'anio',
+    word == 'anos' ~ 'anio',
+    TRUE ~ word
+  ))
+```
+
+## Etapa 2: Consignas
+
+¿Cuáles son las palabras más utilizadas en cada uno de los medios? ¿Pueden verse diferencias? (Tener en cuenta las diferentes métricas trabajadas en el curso: tf, tf-idf, etc.) Generar las visualizaciones que considere más pertinentes para responder la pregunta.
+
+### Exploración palabras más frecuentes
+
+Comenzamos explorando el corpus en formato tidy para identificar rápidamente algunos de los términos más frecuentes por medio.
+
+```{r explore_freqs}
+corpus_tidy %>%
+        group_by(word, medio) %>%
+        summarise(n=n()) %>%
+        arrange(desc(n))
+
+# Mediante este código agrupamos las palabras únicas en el corpus, contamos el número de ocurrencias de cada palabra y las ordenamos en función de su frecuencia de aparición, mostrando primero las palabras más frecuentes.
+
+corpus_tidy %>%
+  filter(medio == 'infobae')  %>% 
+  group_by(word) %>%
+  summarise(n=n()) %>%
+  arrange(desc(n))
+        
+# Mirada rápida a las palabras más frecuentes de algunos medios
+
+corpus_tidy %>%
+        group_by(medio, word) %>%
+        summarise(n=n()) %>%
+        arrange(desc(n)) %>%
+        pivot_wider(names_from = medio,
+                    values_from = n)
+
+# Este código calcula el recuento de ocurrencias de cada palabra en el corpus de texto agrupado según el medio de comunicación, y luego reorganiza estos resultados en un formato más ancho donde cada medio tiene sus recuentos de ocurrencias asociados para cada palabra.
+
+```
+
+```{r word_counts}
+word_counts_10 <- corpus_tidy %>%
+        group_by(medio, word) %>%
+        summarise(n=n()) %>%
+        slice_max(n, n = 10) %>% 
+        ungroup()
+
+# En este paso calculamos el recuento de ocurrencias de cada palabra en el corpus, agrupadas por la columna "medio", y almacena estos recuentos en un nuevo dataframe llamado "word_counts" para pasarle a la función de graficado.
+
+word_counts_all_10 <- corpus_tidy %>%
+        group_by(word) %>%
+        summarise(n=n()) %>%
+        slice_max(n, n = 10) %>% 
+        ungroup() %>% 
+        mutate(medio = 'general')
+
+# Aquí calculamos el recuento de ocurrencias de cada palabra en el corpus, sin agrupar por medio. Luego, seleccionamos las 10 palabras más comunes en todo el corpus. A estos resultados les agregamos la etiqueta "general" en la columna "medio" para poder comparar visualmente la distribución general con la distribución por medio
+
+word_counts_top_10 <- word_counts_10 %>% 
+  bind_rows(word_counts_all_10)
+
+# Unifico en un dataset
+```
+
+A continuación creamos una función para automatizar todas las visualizaciones relacionadas a las métricas del corpus. 
+
+```{r crear_viz}
+crear_graf_words <- function(data) {
+  medios <- unique(data$medio)
+  graficos <- list()
+  
+  for (medio_actual in medios) {
+    datos_medio <- data %>%
+      filter(medio == medio_actual) %>%
+      mutate(word = fct_reorder(word, n))
+    
+    grafico <- ggplot(datos_medio, aes(n, word)) +
+                geom_col() +
+                geom_text(aes(label = n), position = position_stack(vjust = 0.5), family = "Courier", color = "white") +
+                labs(title = medio_actual,
+                     x = "Frecuencia",
+                     y = "Palabra") +
+                theme_classic()+
+                theme(plot.title = element_text(hjust= 0.5),
+                      axis.title = element_blank(),
+                      axis.ticks.x = element_blank(),
+                      text = element_text(family = "Courier"))
+    
+    graficos[[medio_actual]] <- grafico
+  }
+  
+  wrap_plots(graficos)
+}
+
+# Esta función crea para cada medio un gráfico con el top 10 de palabras según cada métrica analizada
+
+```
+
+El eje x muestra las palabras y el eje y muestra la frecuencia de cada palabra. El gráfico está segmentado en paneles por cada medio, y las escalas del eje y se ajustan para cada panel individual.
+
+```{r viz}
+crear_graf_words(word_counts_top_10)
+
+# Este código genera una visualización de las palabras más comunes en el corpus, desglosadas por medio y en general. Las palabras más comunes se muestran en orden descendente de frecuencia en cada categoría.
+```
+
+Algunas observaciones preliminares:
+
+-   Clarín e Infobae aportan cada uno el 22% de las noticias al corpus. El peso de las palabras más importantes para estos medios en el ranking general es alto.
+
+-   Año parece una stopword porque es una palabra que presenta una frecuencia alta intra e inter medios.
+
+-   Crónica, LN e Infobae son los únicos que no incluyen nombres propios
+entre las palabras más frecuentes.
+
+-   En LN hay muchas referencias a redes sociales y acciones en ellas (guardar, compartir). Las acciones y "fuente" podrían ser stopwords. Incluso las menciones a RRSS podrían ser producto del scrapping y no del contenido de las notas.
+
+-   Macri aparece como el político más nombrado. Lógicamente, es un resultado esperable si se tiene en cuenta que las notas relevadas corresponden al último año de su gobierno. 
+
+-  Infobae y sobre todo Crónica parecen cubrir temas más generales que los demás medios, al incluir palabras como "polícía", "ciudad", "mujer", "hombre", "casa", "personas", "mundo", "vida". Incluso, la frecuencia de la palabra "policía" en Crónica (#2 o #1 si se excluye el término "anio") podría indicar que la mayor parte de la cobertura de este medio se orienta a la temática policial. De todas formas, en el top 10 también aparecen palabras como "gobierno" y "presidente".
+
+-   La palabra "frente" aparece con frecuencia en varios medios, lo que nos inclina a corroborar si refiere a frentes electorales o simplemente a un adverbio de lugar y, en este caso, debería considerarse como stopword.
+
+-   A modo de síntesis, podría advertirse que las palabras con mayor frecuencia de aparición en la totalidad de los medios se corresponden con la temática política. Es probable que esta vinculación sea un desprendimiento del escenario electoral que signó el período bajo análisis.
+
+### Term Frequency - TF:
+
+A modo de práctica generamos el cálculo de term frequency manualmente para visualizar la distribución de términos según su frecuencia respecto al total de términos, aperturado por medio.
+
+```{r words_tidy}
+# La "term frequency" (frecuencia de término) es una métrica para evaluar la importancia de una palabra en un documento o corpus de documentos, a partir de la medición de la frecuencia de su aparición en comparación con el número total de palabras.
+
+words_tidy <- corpus_tidy %>% 
+  group_by(medio, word) %>% # en función de la consigna, hacemos el conteo de términos por medio
+  summarise(n=n()) %>% 
+  arrange(desc(n)) 
+
+total_words <- words_tidy %>%
+        group_by(medio) %>%
+        summarize(total = sum(n)) 
+
+words_tidy <- words_tidy %>% 
+  left_join(total_words) %>% 
+  ungroup() %>% 
+  arrange(desc(n))
+
+# En este código contamos la frecuencia de cada palabra en el corpus del medio y también el total de palabras en el medio. Con estos datos podemos calcular a continuación la importancia de cada término en el medio.
+```
+
+En esta visualización podemos interactuar para identificar la cantidad de términos por tf:
+
+```{r tf_viz_manual}
+tf_viz <- words_tidy %>% mutate(tf = n/total) %>%
+          ggplot(aes(tf)) +
+                geom_histogram(show.legend = FALSE) +
+                coord_flip()+
+                xlim(NA, 0.0002) +
+                facet_wrap(~medio) +
+                theme_classic()+
+                theme(plot.title = element_text(hjust= 0.5),
+                      axis.title = element_blank(),
+                      axis.ticks.x = element_blank(),
+                      text = element_text(family = "Courier"))
+                  
+ggplotly(tf_viz)
+
+```
+
+Vemos que para los medios más masivos se cumple la Ley de Zipf: pocas palabras ocurren muchas veces. Los corpus de Crónica, Minuto Uno y Télam tienen menos términos que los demás y la tf tiene un rango menor (uso de palabras mejor distribuido).
+
+### Term Frequency - Inverse Document Frequency (TF-IDF)
+
+En esta etapa complementamos el análisis con las métricas de idf y tf_idf, para obtener una medida más completa de la importancia de los términos en el corpus de documentos.
+
+```{r tf_idf}
+tf_idf <- words_tidy %>% 
+  bind_tf_idf(word, medio, n) 
+
+tf_idf %>% select(-total) %>% 
+  arrange(desc(tf_idf))
+
+# En este código calculamos las métricas tf, idf y tf_idf para todos los términos del corpus
+```
+
+Creamos tres dataset, uno por métrica, con el top ten de términos para pasarle a la función de visualización.
+
+```{r top_ten_metricas}
+tf_10 <- tf_idf %>%
+        group_by(medio) %>%
+        slice_max(tf, n = 10) %>% 
+        select(medio, word, tf) %>% 
+        rename(n = tf) %>%
+        mutate(n = log(n + 1) * 100) %>% 
+        mutate(n = round(n, 4))
+
+idf_10 <- tf_idf %>%
+          group_by(medio) %>%
+          arrange(desc(idf)) %>%
+          slice_head(n = 10) %>%
+          select(medio, word, idf) %>%
+          rename(n = idf) %>%
+          mutate(n = log(n + 1) * 100) %>% 
+          mutate(n = round(n, 4))
+
+tf_idf_10 <- tf_idf %>%
+        group_by(medio) %>%
+        arrange(desc(idf)) %>%
+        slice_head(n = 10) %>% 
+        select(medio, word, tf_idf) %>% 
+        rename(n = tf_idf) %>%
+        mutate(n = log(n + 1) * 100) %>% 
+        mutate(n = round(n, 4))
+```
+
+Pasamos cada uno de los top ten de términos por la función de graficado para visualizar los términos más importantes según cada métrica.
+
+```{r tf_viz}
+crear_graf_words(tf_10)
+```
+
+```{r idf_viz}
+crear_graf_words(idf_10)
+```
+
+```{r tf_idf_viz}
+crear_graf_words(tf_idf_10)
+```
+
+Análisis preliminar de TF-IDF:
+
+-   En primer lugar identificamos la necesidad de agregar palabras al
+    listado de stopwords. Entendemos que no aportan información sobre el
+    contenido u orientación de las noticias y a su vez son únicos para
+    algunos medios y eso genera un alto tf_idf.
+
+    Ejemplos: jpe, ap, emj, cronica.com.ar, fvazquez, cronicavirales,
+    hd, pemex, gt, afv, jpg, minutouno.com, ambito.com, ivanovich,
+    loading, paginai, protected, lxs, email, r.c,cp, fel,l.l,d.s, ea,
+    f.f, f.d.s, fh, a.g, pct, telam.la, nacional.el
+
+-   Podemos identificar "firmas" de periodistas (nombres de usuario o
+    siglas) que tampoco son informativas sobre el contenido del corpus.
+
+## Etapa 1.2: Ampliación stopwords y reprocesamiento de la base
+
+El análisis realizado nos permitió encontrar numerosas palabras incluidas en el corpus que creemos son producto del scrapping. Previo a la modelización para identificar tópicos creemos pertinente ampliar el listado de stopwords y repetir el preprocesamiento de los datos. 
+
+Para ampliar el listado de stopwords partimos del listado de palabras con sus métricas de tf e idf.
+
+```{r stopwords_v2}
+# Mediante el siguiente código eliminamos palabras que incluyen puntos y parecen producto de scrapping web. 
+nuevas_stopwords_1 <- tf_idf %>% 
+  select(word) %>% 
+  filter(grepl('\\.', word)) %>% 
+  pull(word)
+
+# En este paso eliminamos palabras de dos caracteres, salvo contadas excepciones que tienen sentido.
+nuevas_stopwords_2 <- tf_idf %>% 
+  select(word) %>% 
+  filter(str_length(word) == 2 & !(word %in% c('pj', 'fe', 'dt', 'tv', 'km', 'cv', 'dr', 'it', 'dj', 'ux'))) %>% 
+  pull(word)
+
+# Este código elimina palabras de tres caracteres. Parece haber más siglas y palabras cortas que tienen sentido pero, dada la gran cantidad de stopwords de 3 caracteres, hay motivos para incluir este paso.
+nuevas_stopwords_3 <- tf_idf %>% 
+  select(word) %>% 
+  filter(str_length(word) == 3 & !(word %in% c('san', 'mil', 'ley', 'afp', 'sur', 'fmi', 'usd', 'rio', 'gol', 'paz', 'mar', 'oro', 'red', 'luz', 'voz' , 'rol', 'sol', 'gas', 'pie', 'par', 'pro', 'via', 'onu', 'ypf', 'iva', 'afa', 'pbi', 'bar', 'cfk', 'eje', 'rey', 'atp', 'don', 'fbi', 'gay', 'psg', 'uba', 'ucr', 'ceo', 'ong', 'fed', 'ojo', 'dea', 'uva', 'cgt', 'ufi', 'app', 'gil', 'vih', 'nba', 'bbc', 'evo', 'hip', 'hop', 'fox', 'nbc', 'rap', 'adn', 'ala', 'eva', 'pan', 'zen', 'afv', 'cck', 'eco', 'oca', 'tio', 'cnn', 'cia', "dni", "uia", "fdt", "uif", "hbo", "mls", "oea", "mep", "gnc", "auh", "che", "oil", "gen", "agn",	"fpv", "lam",	"pib", "cne","duo", "vox", "dow", "uca", "dnu", "pez", "pfa", "pdt", "fda", "fci", "oms", "psa", "feo", "cta", "ego",				
+"faa",	"ute", "ate",	"lio", "fpt", "suv", "gba",	"izq", "aro", "smn", "tnt",	"uco", "ipc", "saa", "tmz", "ccl", "gel", "vip", "esi",	"res", "kun", "tsj", "afi",	"pts", "cnh", "ajo", "acv", "bmw", "bus", "gps", "ile",	"ios", "unc",	"zoo", "jup", "tos", "unl",	"upl", "zeo", "ave", "mte", "mpn", "apn", "mao", "pba", "sms", "cnv", "mdz", "fol", "iso"))) %>% 
+  pull(word)
+
+nuevas_stopwords <- data.frame(word = nuevas_stopwords_1) %>% 
+  bind_rows(data.frame(word = nuevas_stopwords_2)) %>% 
+  bind_rows(data.frame(word = nuevas_stopwords_3))
+
+stop_words_full_v2 <- stop_words_full %>% 
+  bind_rows(tibble(word = c('embed', 'anio', 'ano', 'anos', 'gusta', 'twitter', 'facebook', 'comentar', 'fuente', 'whatsapp', 'guardar', 'compartir', 'mail', 'loading', 'email', 'paginai', 'eltrece', 'infobae', 'http', 'https', 'attribute', 'find_all', 'nonetype', 'object', 'read' ))) %>% 
+  bind_rows(nuevas_stopwords)
+```
+
+A partir de la nueva lista de stopwords, recreamos el corpus en formato tidy y también el dataframe en formato medio/término/n para continuar con el análisis de métricas.
+
+```{r corpus_tidy_v2}
+corpus_tidy_v2 <- corpus_tidy %>% 
+  anti_join(stop_words_full_v2)
+```
+
+```{r words_tidy_v2} 
+words_tidy_v2 <- corpus_tidy_v2 %>% 
+  group_by(medio, word) %>%
+  summarise(n=n())
+
+total_words_v2 <- words_tidy_v2 %>%
+        group_by(medio) %>%
+        summarize(total = sum(n)) 
+
+words_tidy_v2 <- words_tidy_v2 %>% 
+  left_join(total_words_v2) %>% 
+  ungroup() %>% 
+  arrange(desc(n))
+```
+
+### Revisión de métricas
+
+Creamos el gráfico con la distribución de términos según su tf para identificar variaciones respecto a la v1.
+
+```{r tf_viz_manual_v2}
+tf_viz_v2 <- words_tidy_v2 %>% mutate(tf = n/total) %>%
+          ggplot(aes(tf)) +
+                geom_histogram(show.legend = FALSE) +
+                coord_flip()+
+                xlim(NA, 0.0002) +
+                facet_wrap(~medio) +
+                theme_classic()+
+                theme(plot.title = element_text(hjust= 0.5),
+                      axis.title = element_blank(),
+                      axis.ticks.x = element_blank(),
+                      text = element_text(family = "Courier"))
+                  
+ggplotly(tf_viz_v2)
+```
+
+```{r tf_idf_v2}
+tf_idf_v2 <- words_tidy_v2 %>% 
+  bind_tf_idf(word, medio, n) 
+```
+
+Creamos los dataset necesarios para visualizar los principales términos por métrica y por medio, buscando diferencias respecto a la v1.
+
+```{r top_ten_metricas_v2}
+tf_10_v2 <- tf_idf_v2 %>%
+        group_by(medio) %>%
+        arrange(desc(tf)) %>%
+        slice_head(n = 10) %>%
+        select(medio, word, tf) %>% 
+        rename(n = tf) %>%
+        mutate(n = log(n + 1) * 100) %>% 
+        mutate(n = round(n, 4))
+
+idf_10_v2 <- tf_idf_v2 %>%
+          group_by(medio) %>%
+          arrange(desc(idf)) %>%
+          slice_head(n = 10) %>%
+          select(medio, word, idf) %>%
+          rename(n = idf) %>%
+          mutate(n = log(n + 1) * 100) %>% 
+          mutate(n = round(n, 4))
+
+tf_idf_10_v2 <- tf_idf_v2 %>%
+        group_by(medio) %>%
+        arrange(desc(idf)) %>%
+        slice_head(n = 10) %>% 
+        select(medio, word, tf_idf) %>% 
+        rename(n = tf_idf) %>%
+        mutate(n = log(n + 1) * 100) %>% 
+        mutate(n = round(n, 4))
+```
+
+```{r tf_viz_v2}
+crear_graf_words(tf_10_v2) 
+```
+
+```{r idf_viz_v2}
+crear_graf_words(idf_10_v2)
+```
+
+```{r tf_idf_viz_v2}
+crear_graf_words(tf_idf_10_v2)
+```
+
+Análisis final de TF-IDF:
+
+
+------------------------------------------------------------------------
+## Modelado de tópicos: LDA
+
+¿Cuáles son los tópicos principales en el corpus? ¿Pueden evidenciar diferencias en cada uno de los medios? Explicar qué método se utilizó para responder la pregunta, cuáles son los supuestos del mismo. Generar las visualizaciones más adecuadas para responder a las preguntas.
+
+Para implementar un modelado de temas con LDA necesitamos construir una matriz DTM.
+
+```{r dtm_2}
+para_disc_dtm <- corpus_tidy_v2 %>% 
+  group_by(id, word) %>%
+  summarise(n=n())
+# creo un conteo de palabras por noticia, no por medio 
+
+disc_dtm_2 <- para_disc_dtm %>%
+                cast_dtm(id, word, n)
+
+```
+
+En primer lugar intentamos detectar 5 tópicos:
+```{r lda_5}
+lda_5 <- LDA(disc_dtm_2, k = 5, control = list(seed = 555))
+
+write_rds(lda_5,"modelos/lda_5.rds")
+
+lda_5 <- read_rds("modelos/lda_5.rds")
+
+ap_topics_5 <- tidy(lda_5, matrix = "beta") 
+
+ap_topics_5 %>%
+  mutate(beta = round(100*beta,6))
+
+ap_top_terms_5 <- ap_topics_5 %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>% 
+  ungroup() %>%
+  arrange(topic, -beta)
+
+ap_top_terms_5 %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales='free_y') +
+  scale_y_reordered()+
+  theme_minimal()+
+  labs(title = "Palabras más importantes en 5 tópicos LDA") 
+      
+```
+
+La exploración de términos por tópico según el beta (probabilidad de pertenencia a un tópico) permite asociar temáticas a cada uno de ellos:
+
+1- Política Nacional/ Elecciones
+2- Deportes
+3- Sociedad
+4- Política Internacional
+5- Economía
+
+A continuación, hacemos una nueva prueba para explorar si es posible identificar una mayor cantidad de tópicos (k=10):
+
+```{r lda_10}
+lda_10 <- LDA(disc_dtm_2, k = 10, control = list(seed = 1010))  
+
+write_rds(lda_10,"modelos/lda_10.rds")
+
+lda_10 <- read_rds("modelos/lda_10.rds")
+
+ap_topics_10 <- tidy(lda_10, matrix = "beta") 
+
+ap_topics_10 %>%
+  mutate(beta = round(100*beta,6))
+
+ap_top_terms_10 <- ap_topics_10 %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>% 
+  ungroup() %>%
+  arrange(topic, -beta)
+
+ap_top_terms_10 %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales='free_y') +
+  scale_y_reordered() +
+  theme_minimal()+
+  labs(title = "Palabras más importantes en 10 tópicos LDA") 
+```
+
+Con esta prueba, que duplicó la cantidad de tópicos, comenzamos a registrar conjuntos que no tienen un sentido tan definido, catalogados provisoriamente como tópicos de "Sociedad" (1, 3 y 6). A su vez en dos casos es posible reconocer una superposición temática (4 y 8).
+
+1- Sociedad
+2- Política Nacional/ Elecciones
+3- Sociedad (¿Vida Familiar?)
+4- Política Internacional
+5- Policiales
+6- Sociedad
+7- Deporte
+8- Política Internacional
+9- Economía
+10- Cultura/ Cine y Series
+
+En esa dirección, avanzamos en una nueva prueba que propone reducir levemente la cantidad de tópicos (k=8):
+
+```{r lda_8}
+lda_8 <- LDA(disc_dtm_2, k = 8, control = list(seed = 888)) 
+
+write_rds(lda_8,"modelos/lda_8.rds")
+
+lda_8 <- read_rds("modelos/lda_8.rds")
+
+ap_topics_8 <- tidy(lda_8, matrix = "beta") 
+
+ap_topics_8 %>%
+  mutate(beta = round(100*beta,6))
+
+ap_top_terms_8 <- ap_topics_8 %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>% 
+  ungroup() %>%
+  arrange(topic, -beta)
+
+ap_top_terms_8 %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales='free_y') +
+  scale_y_reordered() +
+  theme_minimal()+
+  labs(title = "Palabras más importantes en 8 tópicos LDA") 
+```
+
+En comparación con la prueba anterior, también detectamos tres tópicos con un sentido difuso (1, 3 y 7), mientras que desaparecieron tanto la repetición del tópico "Política Internacional" como el tópico "Cultura/ Cine y Series".
+
+1- Sociedad
+2- Economía
+3- Sociedad
+4- Policiales
+5- Política Internacional
+6- Deportes
+7- Sociedad (¿Y Cultura?)
+8- Política Nacional/ Elecciones
+
+Teniendo en cuenta las tres pruebas realizadas con el modelo LDA, entendemos que el mejor modelo es el que plantea un K=5. La visualización correspondiente a k=5 muestra que algunas palabras como "argentina" o "personas" son comunes a más de un tema. Es decir, que los tópicos identificados tienen cierta superposición en términos de palabras. Como alternativa podríamos considerar los términos que tuvieran la mayor diferencia en β entre el tema 1 y el tema 5 (que son dos de los que mejor podemos interpretar).
+
+DUDA: en el ejemplo que aparece en la notebook, hay dos temas que no tienen un sentido definido y por eso "Esto parece un primer indicador de que deberíamos considerar la posibilidad de utilizar un número de tópicos más elevado". En nuestro caso lo estoy pensando al revés (menos k, mayor definición de tópicos).
+
+```{r beta_lda_5}
+beta_wide <- ap_topics_5 %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  pivot_wider(names_from = topic, values_from = beta) %>% 
+  filter(topic1 > .002 | topic5 > .002) %>%
+  mutate(log_ratio1_5 = log2(topic5 / topic1))
+
+beta_wide %>%
+  ggplot(aes(x=reorder(term,log_ratio1_5) , y=log_ratio1_5)) +
+    geom_col() +
+    coord_flip() +
+    labs(x='Término',
+         y='Log2 ratio topic5/topic1') +
+    theme_minimal()
+```
+
+Palabras como “vidal", "justicia" o "kirchner" caracterizan al tópico 1 (Política Nacional), mientras que “productos”, “inflación” o "mercado" representan al tópico 5 (Economía). Esto contribuye a confirmar que se trata de dos tópicos bien diferenciados por el modelo.
+
+Ya identificados 5 tópicos y confirmada la diferenciación entre ellos podemos utilizar los resultados del modelo para relacionar cada noticia con un tópico. La matriz gamma establece la probabilidad de cada documento a pertenecer a un tópico. En particular nos sirve para asociar tópicos con cada uno de los medios a los que pertenecen las noticias.
+
+```{r gamma_lda_5}
+doc_topics_lda <- tidy(lda_5, matrix = "gamma")
+
+doc_topics_lda %>%
+  mutate(gamma = round(gamma, 5),
+         document = as.integer(document)) %>%
+  arrange(document, desc(gamma))
+```
+
+Cada uno de estos valores es una proporción estimada de palabras de ese documento que se generan a partir de ese tema. En busca de validar que el modelo identifico claramente un tópico asociado a Política Nacional, vamos a revisar el documento que mayor probabilidad tiene de expresarlo.
+
+```{r doc_topic_lda}
+doc_topics_lda %>%
+  filter(topic == 1 | topic == 5) %>% 
+  mutate(gamma = round(gamma, 5)) %>% 
+  arrange(desc(gamma))
+```
+
+En particular, si observamos el documento 94, la probabilidad gamma asociada al tema 1 es 0.99878, lo que significa que el modelo estima que alrededor del 99% de las palabras en el documento 94 se generaron a partir del tema 1. Por lo tanto, podemos concluir que el tema 1 es altamente relevante para el documento 94 según el modelo.
+
+```{r lda_topic_1_doc}
+corpus_tidy_v2%>%
+  filter(id==94) %>%
+  group_by(id, word) %>%
+  summarise(n=n()) %>%
+  select(word, n) %>%
+  arrange(desc(n))
+```
+
+Se ve como en esta noticia parecen predominar palabras del tópico 1 ("nacional", "elecciones"). Veamos el texto completo de este documento:
+
+```{r lda_topic_1_doc_94}
+corpus_base %>%
+  filter(id==94) %>%
+  select(titulo, texto) %>%
+  pull()
+```
+
+La noticia (id=94) habla de las elecciones y, en particular, de las elecciones en la provincia de Mendoza.
+
+A continuación utilizamos la matriz de tópicos por documento para joinear con el medio al que pertenece la noticia y finalmente 
+visualizar la predominancia de tópicos por medio:
+
+```{r lda_5_topics_medio}
+doc_topics_lda %>%
+  rename(id = document) %>%
+  mutate(topic = case_when(
+             topic == 1 ~ "Política Nacional/Elecciones",
+             topic == 2 ~ "Deportes",
+             topic == 3 ~ "Sociedad",
+             topic == 4 ~ "Política Internacional",
+             topic == 5 ~ "Economía"))  %>% 
+  mutate(id = as.integer(id)) %>%
+  left_join(corpus_base %>% filter(id != 9390) %>% select(id, medio) %>% unique()) %>%
+  group_by(medio, topic) %>%
+    summarise(mean = mean(gamma)*100) %>%
+  ggplot() +
+    geom_col(aes(x=topic, y=mean, fill=medio), position='dodge') +
+    theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(title = "Predominancia en medios de 5 tópicos LDA") 
+```
+
+Resultados (interpretación a desarrollar)
+Es posible reconocer diferencias en la prevalencia de los tópicos para cada uno de los medios, con excepción del tópico "Economía" que muestra una prevalencia similar en cuatro medios.
+
+1- Política Nacional/Elecciones = Télam
+2- Deportes = Crónica
+3- Sociedad = La Nación
+4- Política Internacional = Infobae
+5- Economía = Télam, Página 12, Perfil y Clarín
+
+## Modelado de tópicos: STM
+
+Para implementar un modelado de temas con STM necesitamos construir una matriz DFM.
+```{r dfm}
+para_disc_dfm <- corpus_tidy_v2 %>% 
+  group_by(id, word) %>%
+  summarise(n=n())
+
+disc_dfm <- para_disc_dfm %>%
+                cast_dfm(id, word, n)
+
+disc_dfm
+```
+
+A diferencia del modelo LDA, STM permite incorporar metadata que podría influenciar la detección de tópicos. En este caso sumamos como covariable para cada documento a qué medio pertenece.
+```{r metadata}
+metadata <- corpus_tidy_v2 %>% 
+  select(id, medio) %>% 
+  distinct() %>% 
+  left_join(corpus_base %>% select(id, texto))
+
+```
+
+Al igual que con LDA, comenzamos pidiendole al modelo que encuentre 5 tópicos en el corpus:
+```{r stm_5}
+stm_5 <- stm(documents = disc_dfm,
+      K = 5,
+      prevalence = ~medio,
+      max.em.its = 75, 
+      data = metadata,
+      init.type = "Spectral",
+      seed = 555)
+
+write_rds(stm_5,"modelos/stm_5.rds")
+```
+
+```{r stm_5_pre}
+stm_5 <- read_rds("modelos/stm_5.rds")
+```
+
+Vamos a generar dos matrices para explorar los resultados del modelo: palabras por tópico y documentos por tópico
+
+```{r matriz_stm_5}
+# matriz de términos por tópicos
+terminos_stm_5 <- tidy(stm_5, matrix = 'beta')
+```
+
+```{r stm_5_terminos}
+ terminos_stm_5 %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>% 
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales='free_y') +
+  scale_y_reordered() +
+  theme_minimal()+
+  labs(title = "Palabras más importantes en 5 tópicos STM") 
+```
+De manera similar al LDA, podemos identificar tópicos asociados a Política Nacional, a Deportes, a Economía y a Sociedad. No distingue contenidos relacionados a política internacional pero aparece un tópico judicial/policial.
+
+1- Política Nacional/Elecciones
+2- Economía
+3- Justicia/Policial
+4- Sociedad
+5- Deportes
+
+A modo de prueba, y considerando que STM pudo identificar un nuevo tópico, corremos el modelo con un k mayor.
+```{r stm_8}
+# No correr
+stm_8 <- stm(documents = disc_dfm,
+      K = 8,
+      prevalence = ~medio,
+      max.em.its = 75, 
+      data = metadata,
+      init.type = "Spectral",
+      seed = 888)
+
+write_rds(stm_8,"modelos/stm_8.rds")
+```
+
+```{r stm_8_}
+stm_8 <- read_rds("modelos/stm_8.rds")
+```
+
+```{r matriz_stm_8}
+# matriz de términos por tópicos
+
+terminos_stm_8 <- tidy(stm_8, matrix = 'beta')
+
+```
+
+```{r stm_8_terminos}
+ terminos_stm_8 %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>% 
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales='free_y') +
+  scale_y_reordered() +
+  theme_minimal()+
+  labs(title = "Palabras más importantes en 8 tópicos STM") 
+```
+El modelo STM con k = 8 parece tener mayor éxito que LDA para detectar tópicos claros:
+
+1. Política internacional
+2. Políticas de Educación, Salud, Desarrollo Social
+3. Policiales y Justicia
+4. Sociedad y cultura
+5. Deportes
+6. Política Nacional/Elecciones
+7. Economía
+8. Clima y geografía
+
+Dado su éxito hasta acá, hacemos la prueba con 10 tópicos:
+```{r stm_10}
+# No correr
+stm_10 <- stm(documents = disc_dfm,
+      K = 10,
+      prevalence = ~medio,
+      max.em.its = 75, 
+      data = metadata,
+      init.type = "Spectral",
+      seed = 1010)
+
+write_rds(stm_10,"modelos/stm_10.rds")
+```
+
+```{r stm_10_pre}
+stm_10 <- read_rds("modelos/stm_10.rds")
+```
+
+```{r stm_10_terminos}
+terminos_stm_10 <- tidy(stm_10, matrix = 'beta')
+
+ terminos_stm_10 %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 15) %>% 
+  ungroup() %>%
+  arrange(topic, -beta) %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales='free_y') +
+  scale_y_reordered() +
+  theme_minimal()+
+  labs(title = "Palabras más importantes en 10 tópicos STM") 
+```
+
+Notamos que los tópicos 7 y 10 se vuelven similares entre sí, ambos parecen estar relacionados a política interncional. Aunque incorpora un tópico relacionado a medicina y salud puede verse que los términos asociados a él tienen un beta bajo, dando cuenta de la baja potencialidad de esta temática en el contenido analizado.
+
+Dados los resultados hasta acá del modelo STM, vamos a optar por quedarnos con un k=8 ya que muestra tópicos con mayor definición. 
+Al igual que en LDA vamos a validar el tópico de mayor relevancia para este análisis, el número 6 sobre Política Nacional/Elecciones. Con la función labelTopics identificamos que las palabras con mayor probabilidad de pertenecer al tópico hacen clara alusión a los principales candidatos presidenciales mientras que los términos que más distinguen el tema son también apellidos de candidatos políticos.
+
+```{r label_stm}
+labelTopics(stm_8)
+```
+
+```{r}
+findThoughts(stm_8, 
+             texts=metadata %>% select(texto) %>% pull(), 
+             n=10, 
+             topics=6)
+```
+
+A continuación vamos a buscar la predominancia de tópicos por documentos
+```{r doc_topics_stm}
+
+stm_8 <- stm(documents = disc_dfm,
+      K = 8,
+      prevalence = ~medio,
+      max.em.its = 75, 
+      data = metadata,
+      init.type = "Spectral",
+      seed = 888)
+
+write_rds(stm_8,"modelos/stm_8.rds")
+```
+
+```{r stm_8_pre}
+stm_8 <- read_rds("modelos/stm_8.rds")
+```
+
+En este paso notamos que al crear la matriz tópico-documento, la función tidy pisa los id de cada noticia, generando que el posterior join con la metadata para identificar el medio, no funcione. No pudimos resolverlo. Por ende entendemos que el análisis de tópicos STM por noticia no es válido.
+
+```{r stm_8_fail}
+stm_8$id <- metadata$id
+doc_stm_8 <- tidy(stm_8, matrix = 'theta') 
+resultados_con_id <- merge(metadata, doc_stm_8, by.x = "id", by.y = "document", all.y = TRUE)
+```
+
+```{r stm_8_topics_medios}
+doc_stm_8 %>%
+  rename(id = document) %>%
+  mutate(topic = case_when(
+             topic == 1 ~ "Política Internacional",
+             topic == 2 ~ "Políticas de Educación, Salud, Desarrollo Social",
+             topic == 3 ~ "Policiales y Justicia",
+             topic == 4 ~ "Sociedad y Cultura",
+             topic == 5 ~ "Deportes",
+             topic == 6 ~ "Política Nacional/Elecciones",
+             topic == 7 ~ "Economía",
+             topic == 8 ~ "Clima y geografía"))  %>% 
+  mutate(id = as.integer(id)) %>%
+  left_join(metadata %>%  select(id, medio) %>% unique()) %>%
+  group_by(medio, topic) %>%
+    summarise(mean = mean(gamma)*100) %>%
+  ggplot() +
+    geom_col(aes(x=topic, y=mean, fill=medio), position='dodge') +
+    theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(title = "Predominancia en medios de 8 tópicos STM") 
+```
+
+Podemos encontrar predominancia de tópicos por medio:
+1. Política internacional = Página 12
+2. Políticas de Educación, Salud, Desarrollo Social = Clarín
+3. Policiales y Justicia = Crónica y Página 12
+4. Sociedad y cultura = Página 12
+5. Deportes = Télam
+6. Política Nacional/Elecciones = Télam
+7. Economía = Página 12
+8. Clima y geografía = Télam
+
+```{r comparacion_modelos}
+predominancia_lda <- doc_topics_lda %>%
+  rename(id = document) %>%
+  mutate(topic = case_when(
+             topic == 1 ~ "Política Nacional/Elecciones",
+             topic == 2 ~ "Deportes",
+             topic == 3 ~ "Sociedad",
+             topic == 4 ~ "Política Internacional",
+             topic == 5 ~ "Economía"))  %>% 
+  mutate(id = as.integer(id)) %>%
+  left_join(corpus_base %>% select(id, medio) %>% unique()) %>%
+  group_by(medio, topic) %>%
+  summarise(mean = mean(gamma) * 100) %>%
+  arrange(medio, desc(mean)) %>%
+  slice(1) %>%
+  mutate(model = "LDA")
+
+predominancia_stm <- doc_stm_8 %>%
+  rename(id = document) %>%
+  mutate(topic = case_when(
+             topic == 1 ~ "Política Internacional",
+             topic == 2 ~ "Políticas de Educación, Salud, Desarrollo Social",
+             topic == 3 ~ "Policiales y Justicia",
+             topic == 4 ~ "Sociedad y Cultura",
+             topic == 5 ~ "Deportes",
+             topic == 6 ~ "Política Nacional/Elecciones",
+             topic == 7 ~ "Economía",
+             topic == 8 ~ "Clima y geografía"))  %>% 
+  mutate(id = as.integer(id)) %>%
+  left_join(corpus_base %>% select(id, medio) %>% unique()) %>%
+  na.omit(medio) %>% 
+  group_by(medio, topic) %>%
+  summarise(mean = mean(gamma) * 100) %>%
+  arrange(medio, desc(mean)) %>%
+  slice(1) %>%
+  mutate(model = "STM")
+
+# Combinar ambos conjuntos de datos
+combined_data <- bind_rows(predominancia_lda, predominancia_stm)
+
+# Gráfico de barras con etiquetas de tópicos
+ggplot(combined_data, aes(x = medio, y = mean, fill = model, label = topic)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(position = position_dodge(width = 1),    
+            vjust = -0.5,                             
+            size = 3,                                 
+            aes(color = model),                       
+            angle = 0,                              
+            show.legend = FALSE) +                   
+  theme_minimal() +
+  coord_flip()+
+  labs(title = "Predominancia del tópico más relevante por modelo y medio",
+       x = "Medio",
+       y = "Predominancia",
+       fill = "Modelo") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+------------------------------------------------------------------------
+
+A continuación, seleccionar las noticias vinculadas a algún tópico relevante (por ejemplo, “Elecciones”) y construir un clasificador para predecir la orientación del diario. Utilizar alguno de los modelos de clasificación vistos a lo largo de al Diplomatura (regresión logística, random forest, etc.). Utilizar como features el “Spanish Billion Word Corpus and Embeddings”, analizado en clase (pueden descargar el embedding en formato .bin del link). ¿Qué resultados arroja el modelo? ¿Es posible mediante el texto de las noticias conocer la línea editorial del diario? Generar las visualizaciones y tablas correspondientes para una correcta evaluación del modelo.
+
+Buscamos la representación vectorial de palabras en español:
+```{r load_embed}
+load_embeddings <- function(path=NULL, type=c("w2v", "ft")){
+        if (type=="w2v"){
+                embedding <- word2vec::read.wordvectors(path, 
+                                                        type = "bin", 
+                                                        normalize = TRUE) %>%
+                        as_tibble(rownames="word")
+        }
+        else if (type=="ft"){
+                model <- fastTextR::ft_load(path)
+                words <- fastTextR::ft_words(model)
+                embedding <- fastTextR::ft_word_vectors(model,
+                                                        words) %>%
+                        as_tibble(rownames="word")
+        }
+        
+        return(embedding)
+}
+
+
+embedding <- load_embeddings(path = "SBW-vectors-300-min5.bin",
+                             type = "w2v")
+```
+
+Nos quedamos con las noticias cuyo mayor gamma está asociado al tópico 1:
+```{r noticias_topico_1}
+docs_topico_1 <- doc_topics_lda %>%
+              mutate(gamma = round(gamma, 5)) %>% 
+              rename(id = document) %>%
+              mutate(id = as.integer(id)) %>% 
+              left_join(corpus_base %>% select(id, medio, orientacion) %>% unique()) %>%
+              arrange(id, desc(gamma)) %>% 
+              group_by(id) %>%
+              slice_max(gamma, n = 1) %>% 
+              filter(topic == 1&orientacion != 'neutro') %>% 
+              mutate(orientacion = case_when(orientacion == '+ conservador'~'conservador',
+                                             orientacion == '+ progresista'~'progresista')) 
+```
+
+Buscamos los tokens de las noticias seleccionadas:
+```{r tokens_1}
+words_topico_1 <- docs_topico_1 %>% 
+                  left_join(corpus_tidy_v2 %>% select(id, word))
+```
+
+Unimos los tokens del tópico 1 con su embedding:
+```{r embeds_1}
+embeds_topico_1 <- words_topico_1 %>% 
+                    left_join(embedding)
+```
+
+```{r embeds_doc}
+docs_embed <- embeds_topico_1 %>%
+        group_by(id, orientacion) %>%
+        summarise(across(V1:V300, ~mean(.x, na.rm=TRUE))) %>%
+        ungroup()
+```
+
+```{r workflow}
+set.seed(649)
+docs_split <- initial_split(docs_embed, strata = orientacion)
+
+train_embed <- training(docs_split)
+test_embed <- testing(docs_split)
+
+lasso_spec <- logistic_reg(
+        penalty = tune(),
+        mixture = 1) %>%
+        set_mode("classification") %>%
+        set_engine("glmnet") 
+
+docs_embed_recipe <- recipe(orientacion ~ ., data = train_embed) %>%
+                     update_role("id", new_role = "ID")
+
+
+wf_embed <- workflow() %>% 
+        add_recipe(docs_embed_recipe) %>%
+        add_model(lasso_spec)
+
+grid_lasso <- grid_regular(penalty(), levels = 30)
+
+
+set.seed(123)
+embed_folds <- vfold_cv(train_embed, v = 5)
+```
+
+Entrenamos el modelo:
+```{r train}
+tune_lasso_embed <- tune_grid(
+        wf_embed,
+        embed_folds,
+        grid = grid_lasso,
+        control = control_resamples(save_pred = TRUE)
+)
+```
+
+Elegimos los dos mejores modelos según accuracy y error estándar:
+```{r accuracy}
+show_best(tune_lasso_embed, "accuracy", n=2)
+```
+
+```{r std_error}
+chosen_auc_embed <- tune_lasso_embed %>%
+  select_by_one_std_err(metric = "accuracy", -penalty)
+
+chosen_auc_embed
+```
+
+```{r finalize_model}
+final_params_lasso_embed <- finalize_workflow(wf_embed, chosen_auc_embed)
+final_params_lasso_embed
+```
+
+Fiteamos el modelo elegido con el set de train:
+```{r fit}
+fitted_lasso_embed <- fit(final_params_lasso_embed, train_embed)
+```
+
+Predecimos sobre el set de test:
+```{r test}
+  preds_embed <- test_embed %>%
+          select(orientacion) %>%
+          bind_cols(predict(fitted_lasso_embed, test_embed, type="prob")) %>%
+          bind_cols(predict(fitted_lasso_embed, test_embed, type="class")) %>% 
+  mutate(orientacion = factor(orientacion,levels = c("conservador","progresista")),
+         .pred_class = factor(.pred_class,levels = c("conservador","progresista"))) 
+       
+```
+
+```{r matriz confusion}
+cm <- conf_mat(data = preds_embed,
+               truth = orientacion,
+               estimate = .pred_class )
+
+cm
+```
+
+
+```{r metrica}
+class_metrics <- metric_set(precision, accuracy,
+                            recall, f_meas)
+class_metrics(preds_embed, truth = orientacion, estimate = .pred_class) 
+```
+Acá intercambiamos el nivel de las clases para identificar el recall de la clase progresista
+```{r preds}
+  preds_embed_2 <- test_embed %>%
+          select(orientacion) %>%
+          bind_cols(predict(fitted_lasso_embed, test_embed, type="prob")) %>%
+          bind_cols(predict(fitted_lasso_embed, test_embed, type="class")) %>% 
+  mutate(orientacion = factor(orientacion,levels = c("progresista","conservador")),
+         .pred_class = factor(.pred_class,levels = c("progresista","conservador"))) 
+
+class_metrics(preds_embed_2, truth = orientacion, estimate = .pred_class) 
+       
+```
+
+68% de los casos son clasificados correctamente como conservadores o progresistas.
+En los casos de medios conservadores, en un 86% de las veces el contenido de las noticias sirve para identificarlos como tales. En contraste solo el 38% de los documentos de medios con orientación progresista pueden ser identificados como tales a partir de su contenido.
+
